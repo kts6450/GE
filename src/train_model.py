@@ -1,12 +1,28 @@
 import argparse
 import json
+import os
 import random
 
+# Metal(GPU) / XLA 컴파일 hang 방지: CPU 전용 + Eager 모드 강제
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+
+import tensorflow as tf
+
+# Apple Silicon Metal GPU 비활성화 + Eager 실행 강제 (XLA / tf.data hang 방지)
+# keras import 전에 설정해야 적용됨
+tf.config.set_visible_devices([], "GPU")
+tf.config.run_functions_eagerly(True)
+tf.data.experimental.enable_debug_mode()
+
 import joblib
+import matplotlib
+matplotlib.use("Agg")  # macOS GUI 충돌 방지: 비대화형 백엔드 강제
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+from sklearn.model_selection import train_test_split
 from tensorflow import keras
 from tensorflow.keras import layers
 
@@ -42,15 +58,18 @@ def build_dense_model(input_dim: int) -> keras.Model:
         [
             layers.Input(shape=(input_dim,)),
             layers.Dense(128, activation="relu"),
-            layers.Dropout(0.2),
             layers.Dense(64, activation="relu"),
-            layers.Dropout(0.2),
             layers.Dense(32, activation="relu"),
             layers.Dense(1),
         ],
         name="ge_dense_regression",
     )
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001), loss="mse", metrics=["mae"])
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        loss="mse",
+        metrics=["mae"],
+        run_eagerly=True,
+    )
     return model
 
 
@@ -59,15 +78,18 @@ def build_lstm_model(lookback_days: int, feature_count: int) -> keras.Model:
         [
             layers.Input(shape=(lookback_days, feature_count)),
             layers.LSTM(64, return_sequences=True),
-            layers.Dropout(0.2),
             layers.LSTM(32),
-            layers.Dropout(0.2),
             layers.Dense(16, activation="relu"),
             layers.Dense(1),
         ],
         name="ge_lstm_regression",
     )
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001), loss="mse", metrics=["mae"])
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        loss="mse",
+        metrics=["mae"],
+        run_eagerly=True,
+    )
     return model
 
 
@@ -76,13 +98,10 @@ def create_lstm_sequences(
     targets: np.ndarray,
     lookback_days: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    x_values = []
-    y_values = []
-
-    for index in range(lookback_days, len(features)):
-        x_values.append(features[index - lookback_days : index])
-        y_values.append(targets[index])
-
+    x_values, y_values = [], []
+    for i in range(lookback_days, len(features)):
+        x_values.append(features[i - lookback_days : i])
+        y_values.append(targets[i])
     return np.array(x_values), np.array(y_values)
 
 
@@ -95,14 +114,14 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float
     mae = float(np.mean(np.abs(y_true - y_pred)))
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
     mape = float(np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), 1e-8))) * 100)
-
     return {"mae": mae, "rmse": rmse, "mape": mape}
 
 
 def plot_training_history(history: keras.callbacks.History, output_path) -> None:
     plt.figure(figsize=(10, 5))
     plt.plot(history.history["loss"], label="train_loss")
-    plt.plot(history.history["val_loss"], label="val_loss")
+    if "val_loss" in history.history:
+        plt.plot(history.history["val_loss"], label="val_loss")
     plt.title("Training Loss")
     plt.xlabel("Epoch")
     plt.ylabel("MSE")
@@ -120,10 +139,8 @@ def plot_predictions(
 ) -> None:
     plt.figure(figsize=(12, 6))
     plt.plot(dates, actual, label="Actual Close", linewidth=2)
-
     for label, values in predictions.items():
         plt.plot(dates.iloc[-len(values) :], values, label=label, alpha=0.8)
-
     plt.title("GE Actual vs Predicted Close")
     plt.xlabel("Date")
     plt.ylabel("Close Price")
@@ -140,9 +157,13 @@ def train_dense_model(
     feature_columns: list[str],
     target_column: str,
 ) -> tuple[keras.Model, keras.callbacks.History, np.ndarray]:
-    x_train = train_data[feature_columns].to_numpy()
-    y_train = train_data[target_column].to_numpy()
-    x_test = test_data[feature_columns].to_numpy()
+    x_train = train_data[feature_columns].to_numpy(dtype="float32")
+    y_train = train_data[target_column].to_numpy(dtype="float32")
+    x_test = test_data[feature_columns].to_numpy(dtype="float32")
+
+    x_tr, x_val, y_tr, y_val = train_test_split(
+        x_train, y_train, test_size=0.2, random_state=RANDOM_SEED, shuffle=True
+    )
 
     model = build_dense_model(input_dim=len(feature_columns))
     callbacks = [
@@ -151,9 +172,9 @@ def train_dense_model(
     ]
 
     history = model.fit(
-        x_train,
-        y_train,
-        validation_split=0.2,
+        x_tr,
+        y_tr,
+        validation_data=(x_val, y_val),
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         callbacks=callbacks,
@@ -163,7 +184,6 @@ def train_dense_model(
     model.save(DENSE_MODEL_PATH)
     predictions_scaled = model.predict(x_test, verbose=0).reshape(-1)
     predictions = inverse_target(predictions_scaled)
-
     return model, history, predictions
 
 
@@ -175,8 +195,8 @@ def train_lstm_model(
     lookback_days: int = LSTM_LOOKBACK_DAYS,
 ) -> tuple[keras.Model, keras.callbacks.History, np.ndarray]:
     combined_data = pd.concat([train_data, test_data], ignore_index=True)
-    features = combined_data[feature_columns].to_numpy()
-    targets = combined_data[target_column].to_numpy()
+    features = combined_data[feature_columns].to_numpy(dtype="float32")
+    targets = combined_data[target_column].to_numpy(dtype="float32")
 
     x_all, y_all = create_lstm_sequences(features, targets, lookback_days)
     train_sequence_count = max(len(train_data) - lookback_days, 0)
@@ -185,6 +205,10 @@ def train_lstm_model(
     y_train = y_all[:train_sequence_count]
     x_test = x_all[train_sequence_count:]
 
+    x_tr, x_val, y_tr, y_val = train_test_split(
+        x_train, y_train, test_size=0.2, random_state=RANDOM_SEED, shuffle=True
+    )
+
     model = build_lstm_model(lookback_days=lookback_days, feature_count=len(feature_columns))
     callbacks = [
         keras.callbacks.EarlyStopping(monitor="val_loss", patience=12, restore_best_weights=True),
@@ -192,9 +216,9 @@ def train_lstm_model(
     ]
 
     history = model.fit(
-        x_train,
-        y_train,
-        validation_split=0.2,
+        x_tr,
+        y_tr,
+        validation_data=(x_val, y_val),
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         callbacks=callbacks,
@@ -204,7 +228,6 @@ def train_lstm_model(
     model.save(LSTM_MODEL_PATH)
     predictions_scaled = model.predict(x_test, verbose=0).reshape(-1)
     predictions = inverse_target(predictions_scaled)
-
     return model, history, predictions
 
 
@@ -221,6 +244,7 @@ def main() -> None:
     test_data = pd.read_csv(TEST_DATA_PATH, parse_dates=["Date"])
     target_column = "target_return_next_day_scaled"
 
+    print("\n=== Dense Regression 학습 (TensorFlow) ===")
     _, dense_history, dense_predictions = train_dense_model(
         train_data=train_data,
         test_data=test_data,
@@ -230,22 +254,22 @@ def main() -> None:
 
     actual = test_data["target_close_next_day"].to_numpy()
     current_close = test_data["current_close"].to_numpy()
-    baseline_predictions = current_close
     dense_predictions_close = current_close * (1 + dense_predictions)
 
     metrics = {
-        "baseline_today_equals_tomorrow": calculate_metrics(actual, baseline_predictions),
+        "baseline_today_equals_tomorrow": calculate_metrics(actual, current_close),
         "dense_regression": calculate_metrics(actual, dense_predictions_close),
     }
 
     plot_training_history(dense_history, FIGURES_DIR / "dense_training_loss.png")
 
-    prediction_series = {
-        "Baseline": baseline_predictions,
+    prediction_series: dict[str, np.ndarray] = {
+        "Baseline": current_close,
         "Dense Regression": dense_predictions_close,
     }
 
     if not args.skip_lstm:
+        print("\n=== LSTM Regression 학습 (TensorFlow) ===")
         _, lstm_history, lstm_predictions = train_lstm_model(
             train_data=train_data,
             test_data=test_data,
@@ -268,7 +292,7 @@ def main() -> None:
 
     METRICS_PATH.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(json.dumps(metrics, indent=2))
-    print(f"Saved metrics to {METRICS_PATH}")
+    print(f"\nSaved metrics to {METRICS_PATH}")
 
 
 if __name__ == "__main__":

@@ -16,3 +16,8 @@ reports/metrics.json
 
 # n8n helper writes chosen UI port
 n8n/.n8n-ui-port
+
+# Office temp files
+reports/~$*.pptx
+reports/~$*.xlsx
+reports/~$*.docx

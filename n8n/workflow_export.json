@@ -16,148 +16,133 @@
       "name": "Weekday Schedule",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [
-        -760,
-        0
-      ]
+      "position": [-900, 0]
     },
     {
       "parameters": {
-        "command": "cd C:\\Users\\kts64\\Documents\\ML\\ge-stock-prediction-service && python src\\predict.py --model dense"
+        "method": "GET",
+        "url": "http://localhost:8000/predict",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "model", "value": "dense" }
+          ]
+        },
+        "options": { "timeout": 60000 }
       },
-      "id": "run-prediction",
-      "name": "Run GE Prediction Script",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        -520,
-        0
-      ]
+      "id": "call-prediction-api",
+      "name": "Call Prediction API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-660, -120]
     },
     {
       "parameters": {
-        "jsCode": "const output = $json.stdout || '';\nconst firstBrace = output.indexOf('{');\nconst lastBrace = output.lastIndexOf('}');\nif (firstBrace === -1 || lastBrace === -1) {\n  throw new Error('Prediction JSON was not found in command output.');\n}\nconst payload = JSON.parse(output.slice(firstBrace, lastBrace + 1));\npayload.telegram_message = `[GE Daily Prediction]\\n기준일: ${payload.last_market_date}\\n현재 종가: $${payload.current_close}\\n예측 다음 거래일 종가: $${payload.predicted_next_close}\\n예상 수익률: ${payload.predicted_next_return_pct}%\\n모델: ${payload.model}\\n최근 20일 변동성: ${payload.volatility_20_pct}%\\n주의: 본 결과는 학습용 예측이며 투자 조언이 아닙니다.`;\nreturn [{ json: payload }];"
+        "method": "GET",
+        "url": "http://localhost:8000/compare",
+        "options": { "timeout": 60000 }
       },
-      "id": "parse-prediction",
-      "name": "Parse Prediction Result",
+      "id": "call-compare-api",
+      "name": "Call Compare API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-660, 120]
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = $json;\nconst direction = payload.predicted_next_return_pct >= 0 ? '📈 상승 예상' : '📉 하락 예상';\nconst sign = payload.predicted_next_return_pct >= 0 ? '+' : '';\npayload.discord_message = [\n  '## 📊 GE Daily Prediction',\n  `> **기준일:** ${payload.last_market_date}`,\n  '',\n  `**현재 종가:** $${payload.current_close}`,\n  `**예측 다음 거래일 종가:** $${payload.predicted_next_close}`,\n  `**예상 수익률:** ${sign}${payload.predicted_next_return_pct}%  ${direction}`,\n  '',\n  `🔍 RSI(14): ${payload.rsi_14}  |  MACD: ${payload.macd}`,\n  `📉 변동성(20일): ${payload.volatility_20_pct}%  |  MA20: $${payload.ma_20}`,\n  '',\n  `🤖 모델: ${payload.model}`,\n  '-# ⚠️ 본 결과는 학습용 예측이며 투자 조언이 아닙니다.'\n].join('\\n');\nreturn [{ json: payload }];"
+      },
+      "id": "format-prediction-message",
+      "name": "Format Prediction Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -280,
-        0
-      ]
+      "position": [-420, -120]
     },
     {
       "parameters": {
-        "operation": "append",
-        "documentId": "PUT_YOUR_GOOGLE_SHEET_ID_HERE",
-        "sheetName": {
-          "__rl": true,
-          "value": "GE Predictions",
-          "mode": "name"
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1498150163187765391/tZfUNjwpLarm6SMUU4hwHwhLjHz0PaQA5AH9Kd9Jlais1yVtdU1p37kL_-9MWyMBXIg_",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
         },
-        "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "generated_at_utc": "={{ $json.generated_at_utc }}",
-            "last_market_date": "={{ $json.last_market_date }}",
-            "ticker": "={{ $json.ticker }}",
-            "model": "={{ $json.model }}",
-            "current_close": "={{ $json.current_close }}",
-            "predicted_next_close": "={{ $json.predicted_next_close }}",
-            "predicted_next_return_pct": "={{ $json.predicted_next_return_pct }}",
-            "rsi_14": "={{ $json.rsi_14 }}",
-            "volatility_20_pct": "={{ $json.volatility_20_pct }}"
-          }
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "content", "value": "={{ $json.discord_message }}" }
+          ]
         },
         "options": {}
       },
-      "id": "append-google-sheets",
-      "name": "Append To Google Sheets",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.5,
-      "position": [
-        -40,
-        -100
-      ],
-      "credentials": {
-        "googleSheetsOAuth2Api": {
-          "id": "PUT_CREDENTIAL_ID_HERE",
-          "name": "Google Sheets account"
-        }
-      },
-      "disabled": true
+      "id": "send-prediction-discord",
+      "name": "Send Prediction to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-180, -20]
     },
     {
       "parameters": {
-        "chatId": "PUT_TELEGRAM_CHAT_ID_HERE",
-        "text": "={{ $json.telegram_message }}",
-        "additionalFields": {}
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1498150163187765391/tZfUNjwpLarm6SMUU4hwHwhLjHz0PaQA5AH9Kd9Jlais1yVtdU1p37kL_-9MWyMBXIg_",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "content", "value": "={{ $json.discord_message }}" }
+          ]
+        },
+        "options": {}
       },
-      "id": "send-telegram",
-      "name": "Send Telegram Message",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        -40,
-        100
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "PUT_CREDENTIAL_ID_HERE",
-          "name": "Telegram Bot account"
-        }
-      },
-      "disabled": true
+      "id": "send-compare-discord",
+      "name": "Send Compare to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-180, 220]
     }
   ],
   "connections": {
     "Weekday Schedule": {
       "main": [
         [
-          {
-            "node": "Run GE Prediction Script",
-            "type": "main",
-            "index": 0
-          }
+          { "node": "Call Prediction API", "type": "main", "index": 0 },
+          { "node": "Call Compare API", "type": "main", "index": 0 }
         ]
       ]
     },
-    "Run GE Prediction Script": {
+    "Call Prediction API": {
       "main": [
         [
-          {
-            "node": "Parse Prediction Result",
-            "type": "main",
-            "index": 0
-          }
+          { "node": "Format Prediction Message", "type": "main", "index": 0 }
         ]
       ]
     },
-    "Parse Prediction Result": {
+    "Format Prediction Message": {
       "main": [
         [
-          {
-            "node": "Append To Google Sheets",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Send Telegram Message",
-            "type": "main",
-            "index": 0
-          }
+          { "node": "Send Prediction to Discord", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Call Compare API": {
+      "main": [
+        [
+          { "node": "Send Compare to Discord", "type": "main", "index": 0 }
         ]
       ]
     }
   },
   "pinData": {},
-  "settings": {
-    "executionOrder": "v1"
-  },
+  "settings": { "executionOrder": "v1" },
   "staticData": null,
   "tags": [],
   "triggerCount": 0,
-  "updatedAt": "2026-04-26T07:16:00.000Z",
+  "updatedAt": "2026-04-27T02:48:00.000Z",
   "versionId": "ge-stock-prediction-service"
 }

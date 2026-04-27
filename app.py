@@ -1,10 +1,15 @@
 import html
 import json
+import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.figure_factory as ff
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -378,6 +383,161 @@ def build_price_figure(raw_data: pd.DataFrame) -> go.Figure:
     return fig
 
 
+COMPARE_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ef4444", "#3b82f6", "#8b5cf6"]
+
+
+def render_compare_tab() -> None:
+    from compare import get_comparison_data, THEME_TICKERS
+
+    with st.container(border=True):
+        st.markdown('<h3 class="section-title">GE 테마주 비교 분석</h3>', unsafe_allow_html=True)
+
+        col_info, col_btn = st.columns([3, 1])
+        with col_info:
+            st.caption("GE Aerospace · GE Vernova · GE HealthCare · RTX · Honeywell · Boeing 비교 (2023-01-01 ~)")
+        with col_btn:
+            refresh = st.button("🔄 데이터 새로고침", key="compare_refresh")
+
+        @st.cache_data(ttl=3600, show_spinner="테마주 데이터 로딩 중...")
+        def load_compare():
+            return get_comparison_data(start_date="2023-01-01")
+
+        if refresh:
+            st.cache_data.clear()
+
+        try:
+            data = load_compare()
+        except Exception as e:
+            st.error(f"데이터 로드 실패: {e}")
+            return
+
+        prices = data["prices"]
+        normalized = data["normalized"]
+        returns_table = data["returns_table"]
+        correlation = data["correlation"]
+        volatility = data["volatility"]
+        latest_prices = data["latest_prices"]
+        ticker_labels = data["ticker_labels"]
+        latest_date = data["latest_date"]
+
+        st.caption(f"기준일: {latest_date}")
+
+        # --- 최신 가격 KPI ---
+        kpi_cols = st.columns(len(latest_prices))
+        for i, (ticker, price) in enumerate(latest_prices.items()):
+            ret_1m = returns_table.loc[ticker, "1개월"] if ticker in returns_table.index and "1개월" in returns_table.columns else None
+            color = "#34d399" if ret_1m and ret_1m >= 0 else "#fb7185"
+            sign = "+" if ret_1m and ret_1m >= 0 else ""
+            with kpi_cols[i]:
+                st.markdown(
+                    f"""
+                    <div style="background:rgba(15,23,42,0.06);border:1px solid #e2e8f0;border-radius:12px;padding:0.7rem 0.8rem;text-align:center">
+                        <div style="font-size:0.75rem;font-weight:700;color:#64748b;text-transform:uppercase">{ticker}</div>
+                        <div style="font-size:1.2rem;font-weight:800;color:#0f172a">${price:,.2f}</div>
+                        <div style="font-size:0.8rem;color:{color};font-weight:600">{sign}{ret_1m:.2f}% <span style="color:#94a3b8;font-weight:400">(1M)</span></div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
+
+        # --- 정규화 가격 추이 ---
+        fig_norm = go.Figure()
+        for i, ticker in enumerate(normalized.columns):
+            label = ticker_labels.get(ticker, ticker)
+            color = COMPARE_COLORS[i % len(COMPARE_COLORS)]
+            fig_norm.add_trace(go.Scatter(
+                x=normalized.index,
+                y=normalized[ticker],
+                mode="lines",
+                name=f"{ticker} ({label})",
+                line=dict(color=color, width=2),
+                hovertemplate=f"<b>{ticker}</b><br>%{{x|%Y-%m-%d}}<br>상대가: %{{y:.1f}}<extra></extra>",
+            ))
+        fig_norm.add_hline(y=100, line_dash="dot", line_color="#94a3b8", line_width=1)
+        fig_norm.update_layout(
+            title="정규화 주가 추이 (기준 = 100)",
+            template="plotly_white",
+            height=380,
+            margin=dict(l=0, r=0, t=40, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="#fafafa",
+            font=dict(family="Segoe UI, sans-serif", color="#0f172a"),
+            xaxis=dict(showgrid=True, gridcolor="#e2e8f0"),
+            yaxis=dict(showgrid=True, gridcolor="#e2e8f0", ticksuffix=""),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_norm, use_container_width=True, config={"displayModeBar": False})
+
+        col_left, col_right = st.columns(2, gap="large")
+
+        # --- 기간별 수익률 테이블 ---
+        with col_left:
+            st.markdown('<p class="section-title" style="font-size:0.95rem">기간별 수익률 (%)</p>', unsafe_allow_html=True)
+
+            def color_return(val):
+                if pd.isna(val):
+                    return "color:#94a3b8"
+                return "color:#10b981;font-weight:600" if val >= 0 else "color:#ef4444;font-weight:600"
+
+            display_ret = returns_table.copy()
+            display_ret.index = [f"{t} ({ticker_labels.get(t, '')})" for t in display_ret.index]
+
+            styled = display_ret.style.applymap(color_return).format("{:+.2f}%", na_rep="—")
+            st.dataframe(styled, use_container_width=True)
+
+        # --- 변동성 바 차트 ---
+        with col_right:
+            st.markdown('<p class="section-title" style="font-size:0.95rem">연율화 변동성 (20일, %)</p>', unsafe_allow_html=True)
+            fig_vol = go.Figure(go.Bar(
+                x=list(volatility.index),
+                y=list(volatility.values),
+                marker_color=COMPARE_COLORS[:len(volatility)],
+                text=[f"{v:.1f}%" for v in volatility.values],
+                textposition="outside",
+                hovertemplate="%{x}<br>변동성: %{y:.2f}%<extra></extra>",
+            ))
+            fig_vol.update_layout(
+                template="plotly_white",
+                height=280,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="#fafafa",
+                yaxis=dict(showgrid=True, gridcolor="#e2e8f0", ticksuffix="%"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_vol, use_container_width=True, config={"displayModeBar": False})
+
+        # --- 상관관계 히트맵 ---
+        st.markdown('<p class="section-title" style="font-size:0.95rem">수익률 상관관계 (최근 6개월)</p>', unsafe_allow_html=True)
+        tickers_corr = list(correlation.columns)
+        z = correlation.values.tolist()
+        fig_heat = ff.create_annotated_heatmap(
+            z=z,
+            x=tickers_corr,
+            y=tickers_corr,
+            annotation_text=[[f"{v:.2f}" for v in row] for row in z],
+            colorscale="RdBu",
+            zmin=-1, zmax=1,
+            showscale=True,
+            reversescale=True,
+        )
+        fig_heat.update_layout(
+            height=340,
+            margin=dict(l=0, r=0, t=10, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Segoe UI, sans-serif", size=12),
+        )
+        st.plotly_chart(fig_heat, use_container_width=True, config={"displayModeBar": False})
+
+        st.markdown(
+            '<div class="notice-box" style="margin-top:0.5rem">본 비교 데이터는 교육·참고용입니다. 투자 권유가 아닙니다.</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def render_dashboard() -> None:
     render_global_css()
 
@@ -443,7 +603,7 @@ def render_dashboard() -> None:
 
     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs(["가격 추세", "예측 히스토리", "서비스 구조"])
+    tab1, tab2, tab3, tab4 = st.tabs(["가격 추세", "예측 히스토리", "테마주 비교", "서비스 구조"])
     with tab1:
         with st.container(border=True):
             st.markdown('<h3 class="section-title">GE 종가 추세</h3>', unsafe_allow_html=True)
@@ -474,6 +634,9 @@ def render_dashboard() -> None:
                 render_data_table(history[existing].tail(20))
 
     with tab3:
+        render_compare_tab()
+
+    with tab4:
         with st.container(border=True):
             st.markdown('<h3 class="section-title">자동화 흐름 (n8n)</h3>', unsafe_allow_html=True)
             st.code(

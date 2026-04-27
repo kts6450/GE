@@ -1,12 +1,22 @@
 import argparse
 import csv
 import json
+import os
 from datetime import datetime, timezone
+
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+
+import tensorflow as tf
+
+tf.config.set_visible_devices([], "GPU")
+tf.config.run_functions_eagerly(True)
+tf.data.experimental.enable_debug_mode()
 
 import joblib
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 
 from collect_data import collect_stock_data
 from config import (
@@ -31,11 +41,11 @@ def load_feature_columns() -> list[str]:
 
 def prepare_latest_features(raw_data: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
     data = add_technical_indicators(raw_data)
-    data = data.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
-
+    data = data.replace([np.inf, -np.inf], np.nan)
+    check_cols = [c for c in data.columns if not c.startswith("target_")]
+    data = data.dropna(subset=check_cols).reset_index(drop=True)
     if data.empty:
         raise RuntimeError("No usable rows after feature engineering.")
-
     return data
 
 
@@ -45,10 +55,9 @@ def predict_dense(data: pd.DataFrame, feature_columns: list[str]) -> float:
     model = tf.keras.models.load_model(DENSE_MODEL_PATH)
 
     latest_features = data[feature_columns].tail(1)
-    latest_scaled = feature_scaler.transform(latest_features)
+    latest_scaled = feature_scaler.transform(latest_features).astype("float32")
     prediction_scaled = model.predict(latest_scaled, verbose=0)
     prediction = target_scaler.inverse_transform(prediction_scaled)[0][0]
-
     return float(prediction)
 
 
@@ -61,11 +70,10 @@ def predict_lstm(data: pd.DataFrame, feature_columns: list[str]) -> float:
         raise RuntimeError(f"LSTM prediction requires at least {LSTM_LOOKBACK_DAYS} processed rows.")
 
     latest_features = data[feature_columns].tail(LSTM_LOOKBACK_DAYS)
-    latest_scaled = feature_scaler.transform(latest_features)
+    latest_scaled = feature_scaler.transform(latest_features).astype("float32")
     sequence = np.expand_dims(latest_scaled, axis=0)
     prediction_scaled = model.predict(sequence, verbose=0)
     prediction = target_scaler.inverse_transform(prediction_scaled)[0][0]
-
     return float(prediction)
 
 
@@ -124,8 +132,8 @@ def format_message(payload: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Predict next trading day close for GE.")
-    parser.add_argument("--model", choices=["dense", "lstm"], default="dense", help="Model to use.")
-    parser.add_argument("--start", default=START_DATE, help="Download start date.")
+    parser.add_argument("--model", choices=["dense", "lstm"], default="dense")
+    parser.add_argument("--start", default=START_DATE)
     args = parser.parse_args()
 
     ensure_directories()

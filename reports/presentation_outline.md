@@ -1,100 +1,287 @@
-# 발표 자료 구성안
+# GE 주가 예측 자동 리포트 서비스 — 발표 문서
 
-## 1. 프로젝트 주제
+> **프로젝트명**: GE Stock Intelligence  
+> **목적**: 교육용 ML 파이프라인 실습  
+> **면책**: 본 결과는 학습용 예측이며 투자 조언이 아닙니다.
 
-General Electric(`GE`) 주가 데이터를 활용해 다음 거래일 수익률을 예측하고, 이를 예상 종가로 환산해 n8n으로 자동 리포트를 발송하는 서비스입니다.
+---
+
+## 1. 프로젝트 개요
+
+General Electric(`GE Aerospace`, 티커: GE)의 주가 데이터를 수집·전처리하고,  
+머신러닝 회귀 모델로 **다음 거래일 종가를 예측**한 뒤,  
+n8n 자동화를 통해 **매일 아침 Discord로 리포트를 발송**하는 End-to-End 서비스입니다.
+
+### 핵심 키워드
+`yfinance` · `scikit-learn` · `MLP Regression` · `FastAPI` · `Streamlit` · `n8n` · `Discord Webhook`
+
+---
 
 ## 2. 문제 정의
 
-주식 가격은 불확실성이 크지만, 과거 가격·거래량·기술적 지표를 활용하면 단기적인 수익률 움직임을 회귀 문제로 모델링할 수 있습니다.
+| 항목 | 내용 |
+|---|---|
+| **예측 대상** | 다음 거래일 수익률 → 예상 종가로 환산 |
+| **입력 피처** | 과거 OHLCV + 기술적 지표 28개 |
+| **출력** | 다음 거래일 수익률 (회귀) |
+| **모델 타입** | 지도학습 · 회귀(Regression) |
 
-예측 대상:
+주가 예측은 분류(상승/하락)가 아닌 **연속값 회귀**로 접근합니다.  
+예측 수익률을 현재 종가에 곱해 다음 거래일 예상 종가를 산출합니다.
 
-- 입력: 과거 OHLCV와 기술적 지표
-- 출력: 다음 거래일 수익률
+---
 
-## 3. 데이터 수집
+## 3. 전체 아키텍처
 
-- 데이터 출처: Yahoo Finance
-- 티커: `GE`
-- 기간: 2014년 이후 일봉 데이터
-- 수집 도구: `yfinance`
-- 주요 컬럼: `Open`, `High`, `Low`, `Close`, `Adj Close`, `Volume`
-
-## 4. 전처리
-
-- 날짜 정렬 및 중복 제거
-- 결측치 제거
-- 다음 거래일 수익률과 다음 거래일 종가 타깃 생성
-- 학습/테스트 데이터 분리
-- `MinMaxScaler` 정규화
-
-## 5. Feature Engineering
-
-- 이동평균: 5일, 10일, 20일, 60일
-- 변동성: 5일, 20일 수익률 표준편차
-- RSI(14)
-- MACD, MACD Signal, MACD Histogram
-- Bollinger Band 위치와 폭
-- 거래량 이동평균과 거래량 변화율
-- 전일 종가 대비 시가 갭
-
-## 6. 모델
-
-Dense Regression:
-
-- 여러 개의 Dense layer와 Dropout 사용
-- 손실 함수: MSE
-- Optimizer: Adam
-- 출력: 다음 거래일 수익률
-
-LSTM Regression:
-
-- 최근 30거래일 시퀀스 입력
-- 시계열 패턴 반영
-- Dense 모델과 성능 비교
-
-## 7. 평가
-
-비교 대상:
-
-- Baseline: 오늘 종가를 내일 종가로 예측
-- TensorFlow Dense Regression
-- TensorFlow LSTM Regression
-
-평가 지표:
-
-- MAE
-- RMSE
-- MAPE
-
-시각화:
-
-- 학습 loss 그래프
-- 실제 종가 vs 예측 종가 그래프
-
-## 8. n8n 서비스화
-
-자동화 흐름:
-
-```mermaid
-flowchart TD
-    schedule[Schedule Trigger] --> command[Execute Python Prediction]
-    command --> parse[Parse JSON Result]
-    parse --> sheets[Append Google Sheets]
-    parse --> telegram[Send Telegram Message]
+```
+Yahoo Finance (yfinance)
+        │
+        ▼
+collect_data.py ──→ data/raw/ge_raw.csv
+        │
+        ▼
+preprocess.py ──→ data/processed/ (train/test CSV)
+        │
+        ▼
+train_model.py ──→ models/ (Dense .pkl, LSTM-window .pkl)
+        │
+        ▼
+predict.py ──→ data/predictions/latest_prediction.json
+        │
+   ┌────┴────┐
+   ▼         ▼
+FastAPI     Streamlit
+(포트 8000)  (포트 8501)
+   │
+   ▼
+n8n 스케줄러 (평일 매일 오전 7시 KST)
+   │
+   ├──→ Discord: 예측 리포트
+   ├──→ Discord: 테마주 비교 리포트 (GE·GEV·GEHC·RTX·HON·BA)
+   └──→ Google Sheets: 누적 기록 저장
 ```
 
-## 9. 한계점
+---
 
-- 주식 가격은 외부 이벤트에 크게 영향을 받습니다.
-- 뉴스, 실적 발표, 금리, 시장 심리 등은 현재 모델에 포함되지 않았습니다.
-- 예측 결과는 교육용 실험이며 투자 조언이 아닙니다.
+## 4. 데이터 수집 (미션 1)
 
-## 10. 개선 방향
+- **출처**: Yahoo Finance (`yfinance` 라이브러리)
+- **티커**: `GE` (GE Aerospace)
+- **기간**: 2014-01-01 ~ 현재 (일봉)
+- **행 수**: 약 3,096행
+- **주요 컬럼**: `Open`, `High`, `Low`, `Close`, `Volume`
 
-- 뉴스 감성분석 추가
-- S&P 500, VIX, 미국 금리 데이터 추가
-- 여러 모델의 앙상블 적용
-- Streamlit 대시보드 구축
-- n8n Webhook으로 사용자 요청 시 즉시 예측 제공
+```python
+# collect_data.py 핵심 코드
+import yfinance as yf
+df = yf.download("GE", start="2014-01-01", auto_adjust=True)
+```
+
+---
+
+## 5. 전처리 및 피처 엔지니어링 (미션 1)
+
+### 생성된 피처 (총 28개)
+
+| 카테고리 | 피처 |
+|---|---|
+| **수익률** | `daily_return`, `target_return_next_day` |
+| **이동평균** | `ma_5`, `ma_10`, `ma_20`, `ma_60` |
+| **갭** | `ma_20_gap`, `ma_60_gap`, `open_gap` |
+| **변동성** | `volatility_5`, `volatility_20` |
+| **거래량** | `volume_change`, `volume_ma_20` |
+| **RSI** | `rsi_14` |
+| **MACD** | `macd`, `macd_signal`, `macd_hist` |
+| **볼린저밴드** | `bb_width`, `bb_position` |
+
+### 정규화
+- 피처: `MinMaxScaler` (0~1 스케일링)
+- 타깃: `MinMaxScaler` (수익률 범위)
+- 학습/테스트 분리: **80% / 20%**
+
+---
+
+## 6. 모델 (미션 2)
+
+> Python 3.12 + TensorFlow 2.21 / Keras 환경에서 학습합니다.  
+> Apple Silicon 환경에서 XLA hang 방지를 위해 Eager 모드 강제 설정이 적용됩니다.
+
+### Dense Regression (TensorFlow Keras)
+
+```
+입력층 (28개 피처)
+   → Dense(128, ReLU)
+   → Dense(64, ReLU)
+   → Dense(32, ReLU)
+   → 출력층(1) — 다음 거래일 수익률
+```
+
+| 하이퍼파라미터 | 값 |
+|---|---|
+| Optimizer | Adam (lr=0.001) |
+| 최대 에폭 | 30 |
+| 배치 크기 | 32 |
+| Early Stopping | patience=12 |
+| ReduceLROnPlateau | patience=6, factor=0.5 |
+| 검증 비율 | 20% |
+
+### LSTM Regression (TensorFlow Keras)
+
+과거 **30거래일** 시퀀스를 입력으로 사용해 시계열 패턴을 학습합니다.
+
+```
+입력: 30일 × 28 피처 시퀀스
+   → LSTM(64, return_sequences=True)
+   → LSTM(32)
+   → Dense(16, ReLU)
+   → 출력층(1) — 다음 거래일 수익률
+```
+
+---
+
+## 7. 모델 평가 결과 (미션 2)
+
+### 평가 지표
+
+| 지표 | 설명 |
+|---|---|
+| **MAE** | 평균 절대 오차 (달러) |
+| **RMSE** | 평균 제곱근 오차 (달러) |
+| **MAPE** | 평균 절대 퍼센트 오차 (%) |
+
+### 결과 비교표
+
+| 모델 | MAE ($) | RMSE ($) | MAPE (%) |
+|---|---|---|---|
+| **Baseline** (오늘=내일) | **3.02** | **4.44** | **1.40** |
+| Dense Regression (TF Keras) | 6.45 | 9.59 | 2.59 |
+| **LSTM Regression (TF Keras)** | **3.13** | **4.58** | **1.44** |
+### 해석
+- Baseline이 성능이 높은 것은 **주가의 자기상관(autocorrelation)** 때문입니다.
+- 주가는 "오늘 가격 ≈ 내일 가격" 경향이 강해, 단순 Baseline을 이기기 어렵습니다.
+- LSTM-window가 Dense보다 좋은 성능 → **시계열 순서 정보**가 유효함을 시사합니다.
+- 모델 개선보다는 **외부 데이터(뉴스·VIX·금리) 추가**가 더 효과적일 것으로 판단됩니다.
+
+---
+
+## 8. 서비스 자동화 (미션 3)
+
+### FastAPI 예측 서버
+
+| 엔드포인트 | 메서드 | 설명 |
+|---|---|---|
+| `/predict?model=dense` | GET | 다음 거래일 종가 예측 |
+| `/compare` | GET | 테마주 6종 비교 리포트 |
+| `/health` | GET | 서버 및 모델 상태 확인 |
+
+### n8n 자동화 워크플로우
+
+```
+Weekday Schedule (매일 오전 7시 KST)
+  ├── /predict 호출 → 예측 메시지 → Discord 전송
+  │                              → Google Sheets 기록
+  └── /compare 호출 → 비교 리포트 → Discord 전송
+```
+
+### Discord 알림 예시
+
+**① 예측 메시지**
+```
+📊 GE Daily Prediction
+기준일: 2026-04-24
+현재 종가: $284.60
+예측 다음 거래일 종가: $299.76
+예상 수익률: +5.33% 📈 상승 예상
+RSI(14): 47.97 | 변동성(20일): 3.20%
+```
+
+**② 테마주 비교 리포트**
+```
+📊 GE 테마주 비교 리포트 (기준일: 2026-04-24)
+
+종목   이름              현재가      1개월      1년
+GE    GE Aerospace    $284.60   ▼ -0.22%  ▲+44.93%
+GEV   GE Vernova    $1,149.19  ▲+31.62%  ▲+219.49%
+GEHC  GE HealthCare   $68.83   ▼ -3.74%   ▲+2.85%
+RTX   RTX(라이시온)   $174.26   ▼ -9.64%  ▲+45.28%
+HON   Honeywell      $213.17   ▼ -5.33%  ▲+15.09%
+BA    Boeing         $232.44  ▲+19.59%  ▲+31.87%
+```
+
+---
+
+## 9. Streamlit 대시보드
+
+**주소**: `http://localhost:8501`
+
+| 탭 | 내용 |
+|---|---|
+| **가격 추세** | GE 최근 2년 종가 인터랙티브 차트 |
+| **예측 히스토리** | 누적 예측 기록 테이블 |
+| **테마주 비교** | 6종목 정규화 차트·수익률표·상관관계 히트맵 |
+| **서비스 구조** | n8n 자동화 흐름 설명 |
+
+---
+
+## 10. 기술 스택 요약
+
+| 분류 | 기술 |
+|---|---|
+| **언어** | Python 3.13 |
+| **데이터** | yfinance, pandas, numpy |
+| **ML** | scikit-learn (MLPRegressor) |
+| **지표** | RSI, MACD, Bollinger Bands |
+| **API 서버** | FastAPI + uvicorn |
+| **대시보드** | Streamlit + Plotly |
+| **자동화** | n8n (HTTP Request 기반) |
+| **알림** | Discord Webhook |
+| **저장** | JSON, CSV, Google Sheets |
+
+---
+
+## 11. 한계점 및 개선 방향
+
+### 한계점
+- 주가는 **뉴스·실적·금리·시장 심리** 등 외부 요인에 크게 영향받음
+- 기술적 지표만으로는 Baseline(오늘=내일) 대비 우위를 가지기 어려움
+- 과거 패턴이 미래에 반복된다는 가정에 의존
+
+### 개선 방향
+
+| 방향 | 구체적 방법 |
+|---|---|
+| **외부 데이터 추가** | S&P 500, VIX, 미국 국채 금리, 달러 인덱스 |
+| **뉴스 감성분석** | FinBERT 모델로 뉴스 헤드라인 감성 점수화 |
+| **앙상블** | MLP + Random Forest + XGBoost 앙상블 |
+| **모델 고도화** | Transformer 기반 시계열 모델 (Informer, PatchTST) |
+| **서비스 확장** | 다른 종목으로 확장 (S&P 500 구성 종목 전체) |
+
+---
+
+## 12. 프로젝트 파일 구조
+
+```
+GE/
+├── src/
+│   ├── collect_data.py     # 데이터 수집
+│   ├── preprocess.py       # 전처리 및 피처 생성
+│   ├── indicators.py       # 기술적 지표 계산
+│   ├── train_model.py      # 모델 학습
+│   ├── predict.py          # 단일 예측 실행
+│   ├── compare.py          # 테마주 비교 분석
+│   ├── api.py              # FastAPI 서버
+│   ├── run_pipeline.py     # 전체 파이프라인 실행
+│   └── config.py           # 경로/하이퍼파라미터 설정
+├── app.py                  # Streamlit 대시보드
+├── data/
+│   ├── raw/                # 원본 주가 데이터
+│   ├── processed/          # 전처리 데이터 (train/test)
+│   └── predictions/        # 예측 결과 JSON/CSV
+├── models/                 # 학습된 모델 .pkl
+├── reports/
+│   ├── metrics.json        # 모델 평가 결과
+│   └── figures/            # 학습 loss, 예측 그래프
+└── n8n/
+    ├── workflow_export.json # n8n 워크플로우
+    └── README.md           # n8n 설정 가이드
+```

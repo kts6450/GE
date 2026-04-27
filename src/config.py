@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 
@@ -32,7 +33,7 @@ METRICS_PATH = REPORTS_DIR / "metrics.json"
 TEST_SIZE = 0.2
 RANDOM_SEED = 42
 LSTM_LOOKBACK_DAYS = 30
-EPOCHS = 80
+EPOCHS = int(os.environ.get("TRAIN_EPOCHS", "80"))
 BATCH_SIZE = 32
 
 
